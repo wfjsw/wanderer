@@ -14,6 +14,11 @@ defmodule WandererAppWeb.WinterCoAuthController do
 
   require Logger
 
+  # Constants
+  @winterco_cache_prefix "winterco_token_"
+  @eve_token_verify_url "https://login.eveonline.com/oauth/verify"
+  @winterco_character_owner_prefix "winterco_"
+
   @doc """
   Handles the initial OAuth request to WinterCo SEAT.
   Ueberauth handles this automatically through the strategy.
@@ -45,7 +50,7 @@ defmodule WandererAppWeb.WinterCoAuthController do
 
     if user_identifier do
       WandererApp.Cache.put(
-        "winterco_token_#{user_identifier}",
+        @winterco_cache_prefix <> to_string(user_identifier),
         winterco_token,
         ttl: :timer.hours(24)
       )
@@ -78,7 +83,7 @@ defmodule WandererAppWeb.WinterCoAuthController do
 
     # Store the updated WinterCo token with the user_id
     WandererApp.Cache.put(
-      "winterco_token_#{user_id}",
+      @winterco_cache_prefix <> to_string(user_id),
       winterco_token,
       ttl: :timer.hours(24)
     )
@@ -90,7 +95,17 @@ defmodule WandererAppWeb.WinterCoAuthController do
     |> redirect(to: "/characters")
   end
 
+  def callback(%{assigns: %{ueberauth_failure: failure}} = conn, _params) do
+    Logger.warning("WinterCo auth callback failed: #{inspect(failure)}")
+
+    conn
+    |> put_flash(:error, "Authentication failed. Please try again.")
+    |> redirect(to: "/welcome")
+  end
+
   def callback(conn, _params) do
+    Logger.warning("WinterCo auth callback: No auth data present")
+
     conn
     |> redirect(to: "/characters")
   end
@@ -100,7 +115,7 @@ defmodule WandererAppWeb.WinterCoAuthController do
     user_id = get_session(conn, :user_id)
 
     if user_id do
-      WandererApp.Cache.delete("winterco_token_#{user_id}")
+      WandererApp.Cache.delete(@winterco_cache_prefix <> to_string(user_id))
     end
 
     conn
@@ -121,7 +136,7 @@ defmodule WandererAppWeb.WinterCoAuthController do
 
   defp get_or_create_user_from_winterco(winterco_user) do
     # Use the WinterCo user's sub as the hash for user identification
-    user_hash = Map.get(winterco_user, "sub") || UUID.uuid4()
+    user_hash = Map.get(winterco_user, "sub") || generate_uuid()
     user_name = Map.get(winterco_user, "name") || Map.get(winterco_user, "preferred_username")
 
     case WandererApp.Api.User.by_hash(user_hash) do
@@ -141,6 +156,11 @@ defmodule WandererAppWeb.WinterCoAuthController do
     end
   end
 
+  defp generate_uuid do
+    # Use Ecto's ULID generation or fallback to simple random generation
+    Ecto.UUID.generate()
+  end
+
   defp process_eve_character(eve_id, eve_token, user_id, tracking_pool) do
     # First, get character info from ESI
     case get_character_info_from_token(eve_id, eve_token) do
@@ -157,7 +177,7 @@ defmodule WandererAppWeb.WinterCoAuthController do
 
         character_owner_hash =
           Map.get(character_info, "CharacterOwnerHash") ||
-            "winterco_#{eve_id}"
+            @winterco_character_owner_prefix <> to_string(eve_id)
 
         create_or_update_character(character_data, character_owner_hash, user_id)
 
@@ -169,9 +189,7 @@ defmodule WandererAppWeb.WinterCoAuthController do
 
   defp get_character_info_from_token(eve_id, eve_token) do
     # Verify the token and get character info
-    verify_url = "https://login.eveonline.com/oauth/verify"
-
-    case Req.get(verify_url, auth: {:bearer, eve_token.access_token}) do
+    case Req.get(@eve_token_verify_url, auth: {:bearer, eve_token.access_token}) do
       {:ok, %{status: 200, body: body}} when is_map(body) ->
         {:ok, body}
 
@@ -186,7 +204,7 @@ defmodule WandererAppWeb.WinterCoAuthController do
     end
   end
 
-  defp create_or_update_character(character_data, character_owner_hash, user_id) do
+  defp create_or_update_character(character_data, _character_owner_hash, user_id) do
     case WandererApp.Api.Character.by_eve_id(character_data.eve_id) do
       {:ok, character} ->
         # Update existing character
@@ -199,26 +217,31 @@ defmodule WandererAppWeb.WinterCoAuthController do
           tracking_pool: character_data.tracking_pool
         }
 
-        {:ok, character} =
-          character
-          |> WandererApp.Api.Character.update(character_update)
+        case WandererApp.Api.Character.update(character, character_update) do
+          {:ok, updated_character} ->
+            WandererApp.Character.update_character(updated_character.id, character_update)
+            # Ensure character is linked to user
+            maybe_update_character_user_id(updated_character, user_id)
+            updated_character
 
-        WandererApp.Character.update_character(character.id, character_update)
-
-        # Ensure character is linked to user
-        maybe_update_character_user_id(character, user_id)
-
-        character
+          {:error, error} ->
+            Logger.warning("Failed to update character #{character_data.eve_id}: #{inspect(error)}")
+            nil
+        end
 
       {:error, _error} ->
         # Create new character
-        {:ok, character} = WandererApp.Api.Character.create(character_data)
-        :telemetry.execute([:wanderer_app, :user, :character, :registered], %{count: 1})
+        case WandererApp.Api.Character.create(character_data) do
+          {:ok, character} ->
+            :telemetry.execute([:wanderer_app, :user, :character, :registered], %{count: 1})
+            # Link character to user
+            maybe_update_character_user_id(character, user_id)
+            character
 
-        # Link character to user
-        maybe_update_character_user_id(character, user_id)
-
-        character
+          {:error, error} ->
+            Logger.warning("Failed to create character #{character_data.eve_id}: #{inspect(error)}")
+            nil
+        end
     end
   end
 

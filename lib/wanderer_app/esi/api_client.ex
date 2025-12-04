@@ -752,7 +752,7 @@ defmodule WandererApp.Esi.ApiClient do
 
     # Check if WinterCo auth is enabled and try to use passthrough first
     refresh_token_result =
-      if winterco_auth_enabled?() do
+      if WandererApp.Env.winterco_auth_enabled?() do
         case refresh_token_via_winterco(character_id, eve_id) do
           {:ok, _token} = success ->
             success
@@ -766,14 +766,6 @@ defmodule WandererApp.Esi.ApiClient do
       end
 
     handle_refresh_token_result(refresh_token_result, character, character_id, expires_at, scopes)
-  end
-
-  defp winterco_auth_enabled? do
-    config = Application.get_env(:ueberauth, WandererApp.Ueberauth.Strategy.WinterCo.OAuth, [])
-    client_id = Keyword.get(config, :client_id, "")
-    client_secret = Keyword.get(config, :client_secret, "")
-
-    client_id != "" and client_secret != ""
   end
 
   defp refresh_token_via_winterco(character_id, eve_id) do

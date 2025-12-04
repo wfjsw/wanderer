@@ -147,8 +147,7 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo.OAuth do
   def get_token(client, params, headers) do
     client
     |> put_header("Accept", "application/json")
-    |> merge_params(params)
-    |> put_headers(headers)
+    |> OAuth2.Strategy.AuthCode.get_token(params, headers)
   end
 
   # Private functions
