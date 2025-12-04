@@ -31,6 +31,11 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo.OAuth do
   @jwks_cache_key "winterco_jwks"
   @jwks_ttl :timer.hours(1)
 
+  # EVE Online OIDC endpoints
+  @eve_oidc_config_url "https://login.eveonline.com/.well-known/oauth-authorization-server"
+  @eve_oidc_config_cache_key "eve_oidc_config"
+  @eve_jwks_cache_key "eve_jwks"
+
   @doc """
   Fetch OpenID Connect configuration from .well-known endpoint.
   """
@@ -101,6 +106,143 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo.OAuth do
         error
     end
   end
+
+  @doc """
+  Fetch EVE Online OAuth configuration from .well-known/oauth-authorization-server.
+  """
+  def get_eve_oidc_config do
+    case WandererApp.Cache.get(@eve_oidc_config_cache_key) do
+      nil ->
+        fetch_and_cache_eve_oidc_config()
+
+      config ->
+        {:ok, config}
+    end
+  end
+
+  defp fetch_and_cache_eve_oidc_config do
+    case Req.get(@eve_oidc_config_url) do
+      {:ok, %{status: 200, body: body}} when is_map(body) ->
+        WandererApp.Cache.put(@eve_oidc_config_cache_key, body, ttl: @oidc_config_ttl)
+        {:ok, body}
+
+      {:ok, %{status: status, body: body}} ->
+        Logger.warning("Failed to fetch EVE OIDC config: status #{status}, body: #{inspect(body)}")
+        {:error, {:eve_oidc_config_failed, status}}
+
+      {:error, error} ->
+        Logger.warning("Failed to fetch EVE OIDC config: #{inspect(error)}")
+        {:error, error}
+    end
+  end
+
+  @doc """
+  Fetch EVE Online JWKS for JWT signature verification.
+  """
+  def get_eve_jwks do
+    case WandererApp.Cache.get(@eve_jwks_cache_key) do
+      nil ->
+        fetch_and_cache_eve_jwks()
+
+      jwks ->
+        {:ok, jwks}
+    end
+  end
+
+  defp fetch_and_cache_eve_jwks do
+    case get_eve_oidc_config() do
+      {:ok, config} ->
+        jwks_uri = Map.get(config, "jwks_uri")
+
+        if jwks_uri do
+          case Req.get(jwks_uri) do
+            {:ok, %{status: 200, body: body}} when is_map(body) ->
+              WandererApp.Cache.put(@eve_jwks_cache_key, body, ttl: @jwks_ttl)
+              {:ok, body}
+
+            {:ok, %{status: status}} ->
+              {:error, {:eve_jwks_fetch_failed, status}}
+
+            {:error, error} ->
+              {:error, error}
+          end
+        else
+          {:error, :no_eve_jwks_uri}
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Verify an EVE Online access token as a JWT and extract character info.
+  Returns claims including: name (CharacterName), scp (Scopes), owner (CharacterOwnerHash), sub (CharacterID)
+  """
+  def verify_eve_access_token(access_token) do
+    case get_eve_jwks() do
+      {:ok, jwks} ->
+        verify_eve_jwt(access_token, jwks)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp verify_eve_jwt(jwt_string, jwks) do
+    keys = Map.get(jwks, "keys", [])
+
+    # Try to verify with each key until one succeeds
+    result =
+      Enum.find_value(keys, {:error, :invalid_eve_signature}, fn key_map ->
+        try do
+          jwk = JOSE.JWK.from_map(key_map)
+
+          case JOSE.JWT.verify_strict(jwk, ["RS256", "ES256"], jwt_string) do
+            {true, %JOSE.JWT{fields: claims}, _jws} ->
+              {:ok, claims}
+
+            {false, _, _} ->
+              nil
+          end
+        rescue
+          _ -> nil
+        end
+      end)
+
+    result
+  end
+
+  @doc """
+  Extract character info from EVE access token JWT claims.
+  Maps: name -> CharacterName, scp -> Scopes, owner -> CharacterOwnerHash, sub -> CharacterID
+  """
+  def extract_character_info_from_eve_token(claims) do
+    # Extract character ID from sub claim (format: "CHARACTER:EVE:123456")
+    sub = Map.get(claims, "sub", "")
+    character_id = extract_character_id_from_sub(sub)
+
+    %{
+      "CharacterID" => character_id,
+      "CharacterName" => Map.get(claims, "name"),
+      "Scopes" => format_scopes(Map.get(claims, "scp", [])),
+      "CharacterOwnerHash" => Map.get(claims, "owner")
+    }
+  end
+
+  defp extract_character_id_from_sub(sub) when is_binary(sub) do
+    # EVE sub format: "CHARACTER:EVE:123456"
+    case String.split(sub, ":") do
+      ["CHARACTER", "EVE", id] -> id
+      _ -> sub
+    end
+  end
+
+  defp extract_character_id_from_sub(sub), do: sub
+
+  defp format_scopes(scopes) when is_list(scopes), do: Enum.join(scopes, " ")
+  defp format_scopes(scopes) when is_binary(scopes), do: scopes
+  defp format_scopes(_), do: ""
 
   @doc """
   Construct a client for requests to WinterCo SEAT.

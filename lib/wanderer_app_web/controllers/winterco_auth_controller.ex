@@ -16,7 +16,6 @@ defmodule WandererAppWeb.WinterCoAuthController do
   require Logger
 
   # Constants
-  @eve_token_verify_url "https://login.eveonline.com/oauth/verify"
   @winterco_character_owner_prefix "winterco_"
 
   @doc """
@@ -38,8 +37,9 @@ defmodule WandererAppWeb.WinterCoAuthController do
   1. Authenticates the user via WinterCo SEAT
   2. Stores WinterCo tokens in User table (like EVE tokens on Character)
   3. Retrieves EVE Online tokens for all linked characters via passthrough
-  4. Creates/updates all characters in the system
-  5. Creates the user if needed and links all characters
+  4. Verifies EVE tokens as JWTs against EVE Online OIDC
+  5. Creates/updates all characters in the system
+  6. Creates the user if needed and links all characters
   """
   def callback(%{assigns: %{ueberauth_auth: auth, current_user: user} = _assigns} = conn, _params) do
     winterco_token = auth.extra.raw_info.token
@@ -175,8 +175,8 @@ defmodule WandererAppWeb.WinterCoAuthController do
   end
 
   defp process_eve_character(eve_id, character_name, eve_token, user_id, tracking_pool) do
-    # Get character info from ESI or use provided name
-    case get_character_info_from_token(eve_id, eve_token) do
+    # Verify EVE token as JWT and extract character info
+    case get_character_info_from_jwt(eve_id, character_name, eve_token) do
       {:ok, character_info} ->
         # EVE tokens from passthrough don't have refresh_token (we use WinterCo passthrough for refresh)
         character_data = %{
@@ -196,25 +196,28 @@ defmodule WandererAppWeb.WinterCoAuthController do
         create_or_update_character(character_data, character_owner_hash, user_id)
 
       {:error, error} ->
-        Logger.warning("Failed to get character info for EVE ID #{eve_id}: #{inspect(error)}")
+        Logger.warning("Failed to verify EVE token for character #{eve_id}: #{inspect(error)}")
         nil
     end
   end
 
-  defp get_character_info_from_token(eve_id, eve_token) do
-    # Verify the token and get character info
-    case Req.get(@eve_token_verify_url, auth: {:bearer, eve_token.access_token}) do
-      {:ok, %{status: 200, body: body}} when is_map(body) ->
-        {:ok, body}
-
-      {:ok, %{status: status, body: body}} ->
-        Logger.warning("Token verification failed with status #{status}: #{inspect(body)}")
-        # Fallback: just use the eve_id we have
-        {:ok, %{"CharacterID" => eve_id, "CharacterName" => nil}}
+  defp get_character_info_from_jwt(eve_id, character_name, eve_token) do
+    # Verify the EVE access token as JWT against EVE Online OIDC
+    case WandererApp.Ueberauth.Strategy.WinterCo.OAuth.verify_eve_access_token(eve_token.access_token) do
+      {:ok, claims} ->
+        # Extract character info from JWT claims
+        character_info = WandererApp.Ueberauth.Strategy.WinterCo.OAuth.extract_character_info_from_eve_token(claims)
+        {:ok, character_info}
 
       {:error, error} ->
-        Logger.warning("Token verification request failed: #{inspect(error)}")
-        {:ok, %{"CharacterID" => eve_id, "CharacterName" => nil}}
+        Logger.warning("EVE JWT verification failed for character #{eve_id}: #{inspect(error)}")
+        # Fallback: use provided info
+        {:ok, %{
+          "CharacterID" => eve_id,
+          "CharacterName" => character_name,
+          "Scopes" => "",
+          "CharacterOwnerHash" => nil
+        }}
     end
   end
 
