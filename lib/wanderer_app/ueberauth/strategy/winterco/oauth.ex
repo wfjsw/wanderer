@@ -76,6 +76,44 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo.OAuth do
   end
 
   @doc """
+  Refresh the WinterCo access token using the refresh token.
+  This should be called before using the passthrough endpoint if the access token is expired.
+  """
+  def refresh_winterco_token(winterco_token, opts \\ []) do
+    refresh_token = winterco_token.refresh_token
+
+    if is_nil(refresh_token) do
+      {:error, :no_refresh_token}
+    else
+      client =
+        opts
+        |> client()
+        |> OAuth2.Client.put_param(:grant_type, "refresh_token")
+        |> OAuth2.Client.put_param(:refresh_token, refresh_token)
+
+      case OAuth2.Client.get_token(client, [], []) do
+        {:ok, %OAuth2.Client{token: new_token}} ->
+          case Map.get(new_token, :access_token) do
+            nil ->
+              {:error, :token_refresh_failed}
+
+            _ ->
+              {:ok, new_token}
+          end
+
+        {:error, %OAuth2.Response{body: %{"error" => error}} = response} ->
+          description = Map.get(response.body, "error_description", "")
+          Logger.warning("WinterCo token refresh failed: #{error} - #{description}")
+          {:error, {error, description}}
+
+        {:error, %OAuth2.Error{reason: reason}} ->
+          Logger.warning("WinterCo token refresh error: #{inspect(reason)}")
+          {:error, {"error", to_string(reason)}}
+      end
+    end
+  end
+
+  @doc """
   Get user info from WinterCo SEAT (OpenID Connect userinfo endpoint).
   """
   def get_user_info(token, opts \\ []) do
@@ -126,15 +164,82 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo.OAuth do
   @doc """
   Refresh EVE token via WinterCo passthrough endpoint.
   This is used instead of the standard EVE SSO token refresh.
+  
+  The flow is:
+  1. Get the stored WinterCo token (with refresh_token)
+  2. Refresh the WinterCo access token using its refresh_token if expired
+  3. Use the fresh WinterCo access token to call passthrough for EVE token
   """
   def refresh_eve_token(eve_character_id, opts \\ []) do
     # Get the stored WinterCo token for this session/user
     case get_winterco_token_for_refresh(opts) do
       {:ok, winterco_token} ->
-        get_eve_token_passthrough(eve_character_id, winterco_token, opts)
+        # First, ensure the WinterCo token is fresh by refreshing it
+        case ensure_fresh_winterco_token(winterco_token, opts) do
+          {:ok, fresh_winterco_token} ->
+            get_eve_token_passthrough(eve_character_id, fresh_winterco_token, opts)
+
+          {:error, _} = error ->
+            error
+        end
 
       {:error, _} = error ->
         error
+    end
+  end
+
+  @doc """
+  Ensure the WinterCo token is fresh. Refreshes it using refresh_token if needed.
+  Also updates the cached token with the new one.
+  """
+  def ensure_fresh_winterco_token(winterco_token, opts \\ []) do
+    # Check if token is expired (with a 5-minute buffer)
+    is_expired =
+      case winterco_token.expires_at do
+        nil -> true
+        expires_at -> expires_at < DateTime.utc_now() |> DateTime.to_unix() |> Kernel.+(300)
+      end
+
+    if is_expired do
+      case refresh_winterco_token(winterco_token, opts) do
+        {:ok, new_token} ->
+          # Update the cached token
+          update_cached_winterco_token(new_token, opts)
+          {:ok, new_token}
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      {:ok, winterco_token}
+    end
+  end
+
+  defp update_cached_winterco_token(new_token, opts) do
+    user_id = Keyword.get(opts, :user_id)
+    character_id = Keyword.get(opts, :character_id)
+
+    actual_user_id =
+      cond do
+        not is_nil(user_id) ->
+          user_id
+
+        not is_nil(character_id) ->
+          case WandererApp.Character.get_character(character_id) do
+            {:ok, %{user_id: uid}} when not is_nil(uid) -> uid
+            _ -> nil
+          end
+
+        true ->
+          nil
+      end
+
+    if actual_user_id do
+      WandererApp.Cache.put(
+        "winterco_token_#{actual_user_id}",
+        new_token,
+        ttl: :timer.hours(24)
+      )
     end
   end
 
