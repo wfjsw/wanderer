@@ -51,6 +51,12 @@ config :ueberauth, Ueberauth,
          admin_scope:
            "esi-location.read_location.v1 esi-location.read_ship_type.v1 esi-location.read_online.v1 esi-ui.write_waypoint.v1 esi-search.search_structures.v1 esi-wallet.read_character_wallet.v1 esi-wallet.read_corporation_wallets.v1 esi-mail.send_mail.v1",
          callback_path: "/auth/eve/callback"
+       ]},
+    winterco:
+      {WandererApp.Ueberauth.Strategy.WinterCo,
+       [
+         default_scope: "openid profile email eve-online",
+         callback_path: "/auth/winterco/callback"
        ]}
   ]
 

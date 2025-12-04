@@ -745,19 +745,51 @@ defmodule WandererApp.Esi.ApiClient do
        expires_at: expires_at,
        refresh_token: refresh_token,
        scopes: scopes,
-       tracking_pool: tracking_pool
+       tracking_pool: tracking_pool,
+       eve_id: eve_id
      } = character} =
       WandererApp.Character.get_character(character_id)
 
+    # Check if WinterCo auth is enabled and try to use passthrough first
     refresh_token_result =
-      WandererApp.Ueberauth.Strategy.Eve.OAuth.get_refresh_token([],
-        with_wallet: WandererApp.Character.can_track_wallet?(character),
-        is_admin?: WandererApp.Character.can_track_corp_wallet?(character),
-        tracking_pool: tracking_pool,
-        token: %OAuth2.AccessToken{refresh_token: refresh_token}
-      )
+      if winterco_auth_enabled?() do
+        case refresh_token_via_winterco(character_id, eve_id) do
+          {:ok, _token} = success ->
+            success
+
+          {:error, _reason} ->
+            # Fallback to standard EVE SSO refresh
+            refresh_token_via_eve_sso(refresh_token, tracking_pool, character)
+        end
+      else
+        refresh_token_via_eve_sso(refresh_token, tracking_pool, character)
+      end
 
     handle_refresh_token_result(refresh_token_result, character, character_id, expires_at, scopes)
+  end
+
+  defp winterco_auth_enabled? do
+    config = Application.get_env(:ueberauth, WandererApp.Ueberauth.Strategy.WinterCo.OAuth, [])
+    client_id = Keyword.get(config, :client_id, "")
+    client_secret = Keyword.get(config, :client_secret, "")
+
+    client_id != "" and client_secret != ""
+  end
+
+  defp refresh_token_via_winterco(character_id, eve_id) do
+    WandererApp.Ueberauth.Strategy.WinterCo.OAuth.refresh_eve_token(
+      eve_id,
+      character_id: character_id
+    )
+  end
+
+  defp refresh_token_via_eve_sso(refresh_token, tracking_pool, character) do
+    WandererApp.Ueberauth.Strategy.Eve.OAuth.get_refresh_token([],
+      with_wallet: WandererApp.Character.can_track_wallet?(character),
+      is_admin?: WandererApp.Character.can_track_corp_wallet?(character),
+      tracking_pool: tracking_pool,
+      token: %OAuth2.AccessToken{refresh_token: refresh_token}
+    )
   end
 
   defp handle_refresh_token_result(

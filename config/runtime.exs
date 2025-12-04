@@ -218,6 +218,12 @@ config :ueberauth, Ueberauth,
          admin_scope:
            "esi-location.read_location.v1 esi-location.read_ship_type.v1 esi-location.read_online.v1 esi-ui.write_waypoint.v1 esi-search.search_structures.v1 esi-wallet.read_character_wallet.v1 esi-wallet.read_corporation_wallets.v1 esi-mail.send_mail.v1",
          callback_url: "#{web_app_url}/auth/eve/callback"
+       ]},
+    winterco:
+      {WandererApp.Ueberauth.Strategy.WinterCo,
+       [
+         default_scope: "openid profile email eve-online",
+         callback_url: "#{web_app_url}/auth/winterco/callback"
        ]}
   ]
 
@@ -254,6 +260,15 @@ config :ueberauth, WandererApp.Ueberauth.Strategy.Eve.OAuth,
     System.get_env("EVE_CLIENT_WITH_WALLET_SECRET", "<EVE_CLIENT_WITH_WALLET_SECRET>"),
   client_secret_with_corp_wallet:
     System.get_env("EVE_CLIENT_WITH_CORP_WALLET_SECRET", "<EVE_CLIENT_WITH_CORP_WALLET_SECRET>")
+
+# WinterCo SEAT OAuth Configuration
+config :ueberauth, WandererApp.Ueberauth.Strategy.WinterCo.OAuth,
+  client_id: System.get_env("WINTERCO_CLIENT_ID", ""),
+  client_secret: System.get_env("WINTERCO_CLIENT_SECRET", ""),
+  site: System.get_env("WINTERCO_SITE", "https://seat.winterco.org"),
+  authorize_url: System.get_env("WINTERCO_AUTHORIZE_URL", "/oauth/authorize"),
+  token_url: System.get_env("WINTERCO_TOKEN_URL", "/oauth/token"),
+  userinfo_url: System.get_env("WINTERCO_USERINFO_URL", "/oauth/userinfo")
 
 config :logger,
   truncate: :infinity,
