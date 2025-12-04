@@ -8,7 +8,7 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo do
 
   use Ueberauth.Strategy,
     uid_field: "sub",
-    default_scope: "openid profile email eve-online"
+    default_scope: "openid email groups passthrough esi-location.read_location.v1 esi-location.read_ship_type.v1 esi-location.read_online.v1 esi-ui.write_waypoint.v1 esi-search.search_structures.v1"
 
   alias Ueberauth.Auth.Credentials
   alias Ueberauth.Auth.Extra
