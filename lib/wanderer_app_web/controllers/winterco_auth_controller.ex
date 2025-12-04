@@ -4,6 +4,7 @@ defmodule WandererAppWeb.WinterCoAuthController do
 
   This controller handles the OAuth callback from WinterCo SEAT and
   creates/updates multiple EVE Online characters from the passthrough tokens.
+  WinterCo tokens are stored in the User table for persistence.
   """
 
   use WandererAppWeb, :controller
@@ -15,7 +16,6 @@ defmodule WandererAppWeb.WinterCoAuthController do
   require Logger
 
   # Constants
-  @winterco_cache_prefix "winterco_token_"
   @eve_token_verify_url "https://login.eveonline.com/oauth/verify"
   @winterco_character_owner_prefix "winterco_"
 
@@ -36,25 +36,15 @@ defmodule WandererAppWeb.WinterCoAuthController do
 
   This callback:
   1. Authenticates the user via WinterCo SEAT
-  2. Retrieves EVE Online tokens for all linked characters via passthrough
-  3. Creates/updates all characters in the system
-  4. Creates the user if needed and links all characters
+  2. Stores WinterCo tokens in User table (like EVE tokens on Character)
+  3. Retrieves EVE Online tokens for all linked characters via passthrough
+  4. Creates/updates all characters in the system
+  5. Creates the user if needed and links all characters
   """
   def callback(%{assigns: %{ueberauth_auth: auth, current_user: user} = _assigns} = conn, _params) do
     winterco_token = auth.extra.raw_info.token
     winterco_user = auth.extra.raw_info.user
     eve_characters = auth.extra.raw_info.eve_characters || []
-
-    # Store the WinterCo token for future EVE token refreshes
-    user_identifier = get_user_identifier(winterco_user, user)
-
-    if user_identifier do
-      WandererApp.Cache.put(
-        @winterco_cache_prefix <> to_string(user_identifier),
-        winterco_token,
-        ttl: :timer.hours(24)
-      )
-    end
 
     active_tracking_pool = WandererApp.Character.TrackingConfigUtils.get_active_pool!()
 
@@ -62,30 +52,28 @@ defmodule WandererAppWeb.WinterCoAuthController do
     user_id =
       case user do
         nil ->
-          get_or_create_user_from_winterco(winterco_user)
+          get_or_create_user_from_winterco(winterco_user, winterco_token)
 
         user ->
+          # Update existing user with WinterCo token
+          update_user_winterco_token(user.id, winterco_token)
           user.id
       end
 
     # Process all EVE characters from the passthrough
     processed_characters =
       eve_characters
-      |> Enum.map(fn %{eve_id: eve_id, token: eve_token} = _char ->
-        process_eve_character(eve_id, eve_token, user_id, active_tracking_pool)
+      |> Enum.map(fn char ->
+        eve_id = Map.get(char, :eve_id)
+        name = Map.get(char, :name)
+        eve_token = Map.get(char, :token)
+        process_eve_character(eve_id, name, eve_token, user_id, active_tracking_pool)
       end)
       |> Enum.reject(&is_nil/1)
 
     # Log the number of characters processed
     Logger.info(
       "WinterCo auth: Processed #{length(processed_characters)} EVE characters for user #{user_id}"
-    )
-
-    # Store the updated WinterCo token with the user_id
-    WandererApp.Cache.put(
-      @winterco_cache_prefix <> to_string(user_id),
-      winterco_token,
-      ttl: :timer.hours(24)
     )
 
     WandererApp.Character.TrackingConfigUtils.update_active_tracking_pool()
@@ -111,11 +99,11 @@ defmodule WandererAppWeb.WinterCoAuthController do
   end
 
   def signout(conn, _params) do
-    # Clean up WinterCo token from cache
+    # Clear WinterCo token from User table
     user_id = get_session(conn, :user_id)
 
     if user_id do
-      WandererApp.Cache.delete(@winterco_cache_prefix <> to_string(user_id))
+      clear_user_winterco_token(user_id)
     end
 
     conn
@@ -125,51 +113,77 @@ defmodule WandererAppWeb.WinterCoAuthController do
 
   # Private functions
 
-  defp get_user_identifier(winterco_user, nil) do
-    # Use WinterCo user's sub or email as identifier
-    Map.get(winterco_user, "sub") ||
-      Map.get(winterco_user, "email") ||
-      Map.get(winterco_user, "preferred_username")
-  end
-
-  defp get_user_identifier(_winterco_user, user), do: user.id
-
-  defp get_or_create_user_from_winterco(winterco_user) do
+  defp get_or_create_user_from_winterco(winterco_user, winterco_token) do
     # Use the WinterCo user's sub as the hash for user identification
     user_hash = Map.get(winterco_user, "sub") || generate_uuid()
-    user_name = Map.get(winterco_user, "name") || Map.get(winterco_user, "preferred_username")
+    user_name = Map.get(winterco_user, "nam") || Map.get(winterco_user, "name")
 
     case WandererApp.Api.User.by_hash(user_hash) do
       {:ok, user} ->
+        # Update existing user with new WinterCo token
+        update_user_winterco_token(user.id, winterco_token)
         user.id
 
       _ ->
         :telemetry.execute([:wanderer_app, :user, :registered], %{count: 1})
 
-        WandererApp.Api.User
-        |> Ash.Changeset.for_create(:create, %{
-          name: user_name || "User_#{user_hash}",
-          hash: user_hash
+        # Create new user with WinterCo token
+        user =
+          WandererApp.Api.User
+          |> Ash.Changeset.for_create(:create, %{
+            name: user_name || "User_#{user_hash}",
+            hash: user_hash
+          })
+          |> Ash.create!()
+
+        # Update with WinterCo token
+        update_user_winterco_token(user.id, winterco_token)
+        user.id
+    end
+  end
+
+  defp update_user_winterco_token(user_id, winterco_token) do
+    case WandererApp.Api.User.by_id(user_id) do
+      {:ok, user} ->
+        WandererApp.Api.User.update_winterco_token(user, %{
+          winterco_access_token: winterco_token.access_token,
+          winterco_refresh_token: winterco_token.refresh_token,
+          winterco_expires_at: winterco_token.expires_at
         })
-        |> Ash.create!()
-        |> Map.get(:id)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp clear_user_winterco_token(user_id) do
+    case WandererApp.Api.User.by_id(user_id) do
+      {:ok, user} ->
+        WandererApp.Api.User.update_winterco_token(user, %{
+          winterco_access_token: nil,
+          winterco_refresh_token: nil,
+          winterco_expires_at: nil
+        })
+
+      _ ->
+        :ok
     end
   end
 
   defp generate_uuid do
-    # Use Ecto's ULID generation or fallback to simple random generation
     Ecto.UUID.generate()
   end
 
-  defp process_eve_character(eve_id, eve_token, user_id, tracking_pool) do
-    # First, get character info from ESI
+  defp process_eve_character(eve_id, character_name, eve_token, user_id, tracking_pool) do
+    # Get character info from ESI or use provided name
     case get_character_info_from_token(eve_id, eve_token) do
       {:ok, character_info} ->
+        # EVE tokens from passthrough don't have refresh_token (we use WinterCo passthrough for refresh)
         character_data = %{
           eve_id: to_string(eve_id),
-          name: character_info["CharacterName"] || character_info["name"],
+          name: character_info["CharacterName"] || character_name || "Character_#{eve_id}",
           access_token: eve_token.access_token,
-          refresh_token: eve_token.refresh_token,
+          refresh_token: nil,  # No EVE refresh token - use WinterCo passthrough
           expires_at: eve_token.expires_at,
           scopes: Map.get(character_info, "Scopes", ""),
           tracking_pool: tracking_pool
@@ -196,11 +210,11 @@ defmodule WandererAppWeb.WinterCoAuthController do
       {:ok, %{status: status, body: body}} ->
         Logger.warning("Token verification failed with status #{status}: #{inspect(body)}")
         # Fallback: just use the eve_id we have
-        {:ok, %{"CharacterID" => eve_id, "CharacterName" => "Character_#{eve_id}"}}
+        {:ok, %{"CharacterID" => eve_id, "CharacterName" => nil}}
 
       {:error, error} ->
         Logger.warning("Token verification request failed: #{inspect(error)}")
-        {:ok, %{"CharacterID" => eve_id, "CharacterName" => "Character_#{eve_id}"}}
+        {:ok, %{"CharacterID" => eve_id, "CharacterName" => nil}}
     end
   end
 

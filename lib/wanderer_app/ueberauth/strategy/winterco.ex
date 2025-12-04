@@ -4,11 +4,16 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo do
 
   This strategy authenticates users via WinterCo SEAT and provides access
   to multiple EVE Online character tokens through the passthrough endpoint.
+
+  User info is extracted from the id_token JWT claims:
+  - sub: User identifier
+  - nam: User name
+  - acct: List of EVE accounts with {id, name, valid}
   """
 
   use Ueberauth.Strategy,
     uid_field: "sub",
-    default_scope: "openid email groups passthrough esi-location.read_location.v1 esi-location.read_ship_type.v1 esi-location.read_online.v1 esi-ui.write_waypoint.v1 esi-search.search_structures.v1"
+    default_scope: "openid email groups accounts passthrough esi-location.read_location.v1 esi-location.read_ship_type.v1 esi-location.read_online.v1 esi-ui.write_waypoint.v1 esi-search.search_structures.v1"
 
   alias Ueberauth.Auth.Credentials
   alias Ueberauth.Auth.Extra
@@ -65,7 +70,7 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo do
 
         case WandererApp.Ueberauth.Strategy.WinterCo.OAuth.get_access_token(params) do
           {:ok, token} ->
-            fetch_user(conn, token)
+            fetch_user_from_id_token(conn, token)
 
           {:error, {error_code, error_description}} ->
             set_errors!(conn, [error(error_code, error_description)])
@@ -123,11 +128,9 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo do
 
     %Info{
       email: Map.get(user, "email"),
-      name: Map.get(user, "name") || Map.get(user, "preferred_username"),
-      nickname: Map.get(user, "preferred_username"),
-      urls: %{
-        profile: Map.get(user, "profile")
-      }
+      name: Map.get(user, "nam") || Map.get(user, "name"),
+      nickname: Map.get(user, "sub"),
+      urls: %{}
     }
   end
 
@@ -144,36 +147,47 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo do
     }
   end
 
-  defp fetch_user(conn, token) do
+  defp fetch_user_from_id_token(conn, token) do
     conn = put_private(conn, :winterco_token, token)
 
-    case WandererApp.Ueberauth.Strategy.WinterCo.OAuth.get_user_info(token) do
-      {:ok, user} ->
+    # Decode and verify the id_token JWT instead of calling userinfo endpoint
+    case WandererApp.Ueberauth.Strategy.WinterCo.OAuth.decode_and_verify_id_token(token) do
+      {:ok, claims} ->
+        # Extract user info from JWT claims
+        user = %{
+          "sub" => Map.get(claims, "sub"),
+          "nam" => Map.get(claims, "nam"),
+          "email" => Map.get(claims, "email"),
+          "acct" => Map.get(claims, "acct", [])
+        }
+
         conn
         |> put_private(:winterco_user, user)
-        |> maybe_fetch_eve_characters(token, user)
+        |> fetch_eve_characters_from_acct(token, claims)
 
       {:error, error} ->
-        set_errors!(conn, [error("userinfo", inspect(error))])
+        Logger.warning("Failed to decode id_token: #{inspect(error)}")
+        set_errors!(conn, [error("id_token", inspect(error))])
     end
   end
 
-  defp maybe_fetch_eve_characters(conn, token, user) do
-    # If the user info contains EVE character IDs, fetch their tokens
-    eve_character_ids = extract_eve_character_ids(user)
+  defp fetch_eve_characters_from_acct(conn, token, claims) do
+    # Extract EVE accounts from the acct claim, filtering out invalid ones
+    eve_accounts = WandererApp.Ueberauth.Strategy.WinterCo.OAuth.extract_eve_accounts(claims)
 
-    if Enum.empty?(eve_character_ids) do
+    if Enum.empty?(eve_accounts) do
       conn
     else
+      # Fetch EVE tokens for each valid account via passthrough
       characters =
-        eve_character_ids
-        |> Enum.map(fn eve_id ->
+        eve_accounts
+        |> Enum.map(fn %{id: eve_id, name: name} ->
           case WandererApp.Ueberauth.Strategy.WinterCo.OAuth.get_eve_token_passthrough(
                  eve_id,
-                 token
+                 token.access_token
                ) do
             {:ok, eve_token} ->
-              %{eve_id: eve_id, token: eve_token}
+              %{eve_id: to_string(eve_id), name: name, token: eve_token}
 
             {:error, error} ->
               Logger.warning("Failed to get EVE token for character #{eve_id}: #{inspect(error)}")
@@ -185,42 +199,6 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo do
       put_private(conn, :winterco_characters, characters)
     end
   end
-
-  defp extract_eve_character_ids(user) do
-    # Extract EVE character IDs from user info
-    # The format depends on WinterCo SEAT's userinfo response structure
-    # This may contain a list of character IDs or a structured list of characters
-    cond do
-      Map.has_key?(user, "eve_characters") ->
-        user["eve_characters"]
-        |> Enum.map(&extract_character_id/1)
-        |> Enum.reject(&is_nil/1)
-
-      Map.has_key?(user, "character_ids") ->
-        user["character_ids"]
-        |> Enum.map(&to_string/1)
-
-      Map.has_key?(user, "eve_id") ->
-        [to_string(user["eve_id"])]
-
-      true ->
-        []
-    end
-  end
-
-  defp extract_character_id(character) when is_map(character) do
-    Map.get(character, "eve_id") || Map.get(character, "character_id") || Map.get(character, "id")
-    |> case do
-      nil -> nil
-      id -> to_string(id)
-    end
-  end
-
-  defp extract_character_id(character_id) when is_integer(character_id),
-    do: to_string(character_id)
-
-  defp extract_character_id(character_id) when is_binary(character_id), do: character_id
-  defp extract_character_id(_), do: nil
 
   defp with_optional(opts, key, conn) do
     if option(conn, key), do: Keyword.put(opts, key, option(conn, key)), else: opts

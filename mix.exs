@@ -134,6 +134,9 @@ defmodule WandererApp.MixProject do
       {:live_view_events, "~> 0.1.0"},
       {:ash_pagify, "~> 1.4.1"},
       {:timex, "~> 3.0"},
+      # JWT verification for WinterCo OIDC
+      {:joken, "~> 2.6"},
+      {:jose, "~> 1.11"},
       # Test coverage and quality
       {:excoveralls, "~> 0.18", only: :test}
     ]

@@ -223,7 +223,7 @@ config :ueberauth, Ueberauth,
       {WandererApp.Ueberauth.Strategy.WinterCo,
        [
          default_scope:
-           "openid email groups passthrough esi-location.read_location.v1 esi-location.read_ship_type.v1 esi-location.read_online.v1 esi-ui.write_waypoint.v1 esi-search.search_structures.v1",
+           "openid email groups accounts passthrough esi-location.read_location.v1 esi-location.read_ship_type.v1 esi-location.read_online.v1 esi-ui.write_waypoint.v1 esi-search.search_structures.v1",
          callback_url: "#{web_app_url}/auth/winterco/callback"
        ]}
   ]
