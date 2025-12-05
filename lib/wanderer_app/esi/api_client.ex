@@ -758,8 +758,13 @@ defmodule WandererApp.Esi.ApiClient do
             success
 
           {:error, _reason} ->
-            # Fallback to standard EVE SSO refresh
-            refresh_token_via_eve_sso(refresh_token, tracking_pool, character)
+            # Fallback to standard EVE SSO refresh only if we have a refresh_token
+            if not is_nil(refresh_token) do
+              refresh_token_via_eve_sso(refresh_token, tracking_pool, character)
+            else
+              # No EVE refresh_token and WinterCo passthrough failed
+              {:error, :no_refresh_token_available}
+            end
         end
       else
         refresh_token_via_eve_sso(refresh_token, tracking_pool, character)
