@@ -619,7 +619,10 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo.OAuth do
       end
 
     if actual_user_id do
-      case WandererApp.Api.User.by_id(actual_user_id) do
+      # Load WinterCo token calculations (AshCloak encrypted fields are calculations)
+      case WandererApp.Api.User.by_id(actual_user_id,
+             load: [:winterco_access_token, :winterco_refresh_token]
+           ) do
         {:ok, user} ->
           access_token = Map.get(user, :winterco_access_token)
           refresh_token = Map.get(user, :winterco_refresh_token)
