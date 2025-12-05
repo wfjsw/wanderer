@@ -543,11 +543,149 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo.OAuth do
             winterco_expires_at: new_token.expires_at
           })
 
+          # Check if the token response contains a new id_token with updated EVE accounts
+          process_id_token_on_refresh(new_token, actual_user_id)
+
         _ ->
           :ok
       end
     end
   end
+
+  @doc """
+  Process id_token from token refresh response to update EVE accounts.
+  The id_token may contain updated EVE account information in the 'acct' claim.
+  """
+  def process_id_token_on_refresh(token, user_id) do
+    # Check if id_token is present in token response
+    id_token = Map.get(token.other_params || %{}, "id_token")
+
+    if is_nil(id_token) do
+      :ok
+    else
+      case decode_and_verify_id_token(token) do
+        {:ok, claims} ->
+          # Extract EVE accounts from the claims
+          eve_accounts = extract_eve_accounts(claims)
+
+          if length(eve_accounts) > 0 do
+            Logger.info(
+              "WinterCo token refresh: Found #{length(eve_accounts)} EVE accounts in id_token for user #{user_id}"
+            )
+
+            # Process each EVE account
+            process_eve_accounts_on_refresh(eve_accounts, token.access_token, user_id)
+          else
+            :ok
+          end
+
+        {:error, error} ->
+          Logger.warning("Failed to verify id_token on refresh: #{inspect(error)}")
+          :ok
+      end
+    end
+  end
+
+  defp process_eve_accounts_on_refresh(eve_accounts, winterco_access_token, user_id) do
+    active_tracking_pool = WandererApp.Character.TrackingConfigUtils.get_active_pool!()
+
+    # Process each EVE account by fetching token via passthrough
+    Enum.each(eve_accounts, fn account ->
+      eve_id = account.id
+      name = account.name
+
+      case get_eve_token_passthrough(eve_id, winterco_access_token) do
+        {:ok, eve_token} ->
+          process_eve_character_on_refresh(eve_id, name, eve_token, user_id, active_tracking_pool)
+
+        {:error, error} ->
+          Logger.warning(
+            "Failed to get EVE token for character #{eve_id} on refresh: #{inspect(error)}"
+          )
+      end
+    end)
+  end
+
+  defp process_eve_character_on_refresh(eve_id, character_name, eve_token, user_id, tracking_pool) do
+    # Verify EVE token as JWT and extract character info
+    character_info =
+      case verify_eve_access_token(eve_token.access_token) do
+        {:ok, claims} ->
+          extract_character_info_from_eve_token(claims)
+
+        {:error, _} ->
+          # Fallback: use provided info
+          %{
+            "CharacterID" => eve_id,
+            "CharacterName" => character_name,
+            "Scopes" => "",
+            "CharacterOwnerHash" => nil
+          }
+      end
+
+    # EVE tokens from passthrough don't have refresh_token (we use WinterCo passthrough for refresh)
+    character_data = %{
+      eve_id: to_string(eve_id),
+      name: character_info["CharacterName"] || character_name || "Character_#{eve_id}",
+      access_token: eve_token.access_token,
+      refresh_token: nil,
+      expires_at: eve_token.expires_at,
+      scopes: Map.get(character_info, "Scopes", ""),
+      tracking_pool: tracking_pool
+    }
+
+    # Create or update the character
+    case WandererApp.Api.Character.by_eve_id(character_data.eve_id) do
+      {:ok, character} ->
+        # Update existing character
+        character_update = %{
+          name: character_data.name,
+          access_token: character_data.access_token,
+          refresh_token: character_data.refresh_token,
+          expires_at: character_data.expires_at,
+          scopes: character_data.scopes,
+          tracking_pool: character_data.tracking_pool
+        }
+
+        case WandererApp.Api.Character.update(character, character_update) do
+          {:ok, updated_character} ->
+            WandererApp.Character.update_character(updated_character.id, character_update)
+            # Ensure character is linked to user
+            ensure_character_linked_to_user(updated_character, user_id)
+
+          {:error, error} ->
+            Logger.warning(
+              "Failed to update character #{character_data.eve_id} on refresh: #{inspect(error)}"
+            )
+        end
+
+      {:error, _} ->
+        # Create new character
+        case WandererApp.Api.Character.create(character_data) do
+          {:ok, character} ->
+            :telemetry.execute([:wanderer_app, :user, :character, :registered], %{count: 1})
+            # Link character to user
+            ensure_character_linked_to_user(character, user_id)
+
+          {:error, error} ->
+            Logger.warning(
+              "Failed to create character #{character_data.eve_id} on refresh: #{inspect(error)}"
+            )
+        end
+    end
+  end
+
+  defp ensure_character_linked_to_user(character, user_id) when not is_nil(user_id) do
+    case WandererApp.Api.Character.by_id(character.id) do
+      {:ok, loaded_character} ->
+        WandererApp.Api.Character.assign_user!(loaded_character, %{user_id: user_id})
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  defp ensure_character_linked_to_user(_character, _user_id), do: :ok
 
   # Strategy Callbacks
 
