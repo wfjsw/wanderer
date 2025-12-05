@@ -439,7 +439,7 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo.OAuth do
     client = opts |> Keyword.put(:token, token) |> client()
     url = "/oauth/passthrough/#{eve_character_id}"
 
-    case OAuth2.Client.get(client, url) do
+    case OAuth2.Client.post(client, url, %{}) do
       {:ok, %OAuth2.Response{status_code: 200, body: body}} when is_map(body) ->
         parse_eve_token_response(body)
 
