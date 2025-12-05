@@ -397,13 +397,12 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo.OAuth do
     if is_nil(winterco_refresh_token) do
       {:error, :no_refresh_token}
     else
-      client =
-        opts
-        |> client()
-        |> OAuth2.Client.put_param(:grant_type, "refresh_token")
-        |> OAuth2.Client.put_param(:refresh_token, winterco_refresh_token)
+      client = opts |> client()
 
-      case OAuth2.Client.get_token(client, [], []) do
+      # Pass grant_type and refresh_token as params to get_token
+      params = [grant_type: "refresh_token", refresh_token: winterco_refresh_token]
+
+      case OAuth2.Client.get_token(client, params, []) do
         {:ok, %OAuth2.Client{token: new_token}} ->
           case Map.get(new_token, :access_token) do
             nil ->
@@ -559,7 +558,10 @@ defmodule WandererApp.Ueberauth.Strategy.WinterCo.OAuth do
   def get_token(client, params, headers) do
     client
     |> put_header("Accept", "application/json")
-    |> OAuth2.Strategy.AuthCode.get_token(params, headers)
+    |> put_header("Content-Type", "application/x-www-form-urlencoded")
+    |> merge_params(params)
+    |> basic_auth()
+    |> put_headers(headers)
   end
 
   # Private functions
