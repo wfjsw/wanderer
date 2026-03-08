@@ -488,6 +488,17 @@ defmodule WandererAppWeb.Router do
   #
   # Auth
   #
+  #
+  # WinterCo SEAT Auth (OpenID Connect)
+  # Note: This must come BEFORE the generic /auth/:provider route
+  #
+  scope "/auth/winterco", WandererAppWeb do
+    pipe_through :browser
+    get "/", WinterCoAuthController, :request
+    get "/callback", WinterCoAuthController, :callback
+    get "/signout", WinterCoAuthController, :signout
+  end
+
   scope "/auth", WandererAppWeb do
     pipe_through :browser
     get "/signout", AuthController, :signout

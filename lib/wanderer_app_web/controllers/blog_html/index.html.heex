@@ -11,7 +11,17 @@
           </h1>
         </div>
         <!--Right Col-->
-        <div :if={@invite_token_valid} class="overflow-hidden">
+        <div :if={@invite_token_valid} class="overflow-hidden flex flex-col gap-2">
+          <!-- WinterCo SEAT Login (if enabled) -->
+          <div :if={winterco_auth_enabled?()} class="!z-100 relative group alert items-center fade-in-scale text-white w-[224px] h-[44px] rounded p-px overflow-hidden">
+            <div class="group animate-rotate absolute inset-0 h-full w-full rounded-full bg-[conic-gradient(#22c55e_20deg,transparent_120deg)] group-hover:bg-[#22c55e]" />
+            <div class="!bg-black rounded w-[220px] h-[40px] flex items-center justify-center relative z-20">
+              <.link navigate={~p"/auth/winterco?invite=#{@invite_token}"} class="opacity-100 text-white hover:text-green-400 font-bold text-sm">
+                Login with WinterCo SeAT
+              </.link>
+            </div>
+          </div>
+          <!-- EVE SSO Login -->
           <div class="!z-100 relative group alert items-center fade-in-scale text-white w-[224px] h-[44px] rounded p-px overflow-hidden">
             <div class="group animate-rotate absolute inset-0 h-full w-full rounded-full bg-[conic-gradient(#0ea5e9_20deg,transparent_120deg)] group-hover:bg-[#0ea5e9]" />
             <div class="!bg-black  rounded w-[220px] h-[40px] flex items-center justify-center relative z-20">

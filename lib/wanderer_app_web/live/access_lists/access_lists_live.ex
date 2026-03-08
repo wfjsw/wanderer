@@ -369,9 +369,15 @@ defmodule WandererAppWeb.AccessListsLive do
 
   @impl true
   def handle_info({:search, text}, socket) do
+    # Check if user has WinterCo tokens (can get EVE tokens via passthrough)
+    user_has_winterco = has_winterco_tokens?(socket.assigns.current_user)
+
     active_character_id =
       socket.assigns.current_user.characters
-      |> Enum.filter(fn character -> not is_nil(character.refresh_token) end)
+      |> Enum.filter(fn character ->
+        # Character is usable if it has refresh_token OR user has WinterCo tokens
+        not is_nil(character.refresh_token) or user_has_winterco
+      end)
       |> Enum.map(& &1.id)
       |> Enum.at(0)
 
@@ -775,5 +781,10 @@ defmodule WandererAppWeb.AccessListsLive do
           "Failed to invalidate map_characters cache for ACL #{acl_id}: #{inspect(error)}"
         )
     end
+  end
+
+  # Check if user has WinterCo tokens for passthrough authentication
+  defp has_winterco_tokens?(user) do
+    not is_nil(Map.get(user, :winterco_refresh_token))
   end
 end

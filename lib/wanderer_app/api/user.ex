@@ -43,6 +43,10 @@ defmodule WandererApp.Api.User do
     define(:update_balance,
       action: :update_balance
     )
+
+    define(:update_winterco_token,
+      action: :update_winterco_token
+    )
   end
 
   actions do
@@ -67,12 +71,18 @@ defmodule WandererApp.Api.User do
 
       accept([:balance])
     end
+
+    update :update_winterco_token do
+      require_atomic? false
+
+      accept([:winterco_access_token, :winterco_refresh_token, :winterco_expires_at])
+    end
   end
 
   cloak do
     vault(WandererApp.Vault)
 
-    attributes([:balance])
+    attributes([:balance, :winterco_access_token, :winterco_refresh_token])
   end
 
   attributes do
@@ -85,6 +95,19 @@ defmodule WandererApp.Api.User do
     attribute :balance, :float do
       default 0.0
 
+      allow_nil?(true)
+    end
+
+    # WinterCo SEAT OAuth tokens (like EVE Online tokens but for WinterCo)
+    attribute :winterco_access_token, :string do
+      allow_nil?(true)
+    end
+
+    attribute :winterco_refresh_token, :string do
+      allow_nil?(true)
+    end
+
+    attribute :winterco_expires_at, :integer do
       allow_nil?(true)
     end
   end
